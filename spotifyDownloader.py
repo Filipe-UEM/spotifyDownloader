@@ -1,31 +1,134 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║  AERO MUSIC DOWNLOADER  v2.0                                     ║
+║  Winamp × Y2K × Frutiger Aero                                    ║
+║  Open Source – MIT License                                       ║
+║  Producer: github.com/SEU_USUARIO                                ║
+╚══════════════════════════════════════════════════════════════════╝
 
+MIT License
+
+Copyright (c) 2025
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Dependencies (open source):
+  - yt-dlp     (Unlicense)         https://github.com/yt-dlp/yt-dlp
+  - spotDL     (MIT)               https://github.com/spotDL/spotify-downloader
+  - ffmpeg     (LGPL/GPL)          https://ffmpeg.org
+  - mutagen    (GPL-2.0)           https://github.com/quodlibet/mutagen
+"""
+
+import io
 import os
 import queue
 import subprocess
 import sys
 import threading
+import time
+import math
+import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 try:
     from mutagen import File as MutagenFile
+    from mutagen.id3 import ID3
+    from mutagen.mp3 import MP3
 except Exception:
     MutagenFile = None
+    ID3 = None
+    MP3 = None
 
-APP_TITLE = "Retro Music Downloader"
-AUDIO_EXTS = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".opus", ".aac", ".webm"}
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
 
-download_folder = Path.cwd()
+# ─────────────────────────────────────────────
+#  CONSTANTS
+# ─────────────────────────────────────────────
+APP_TITLE   = "AERO MUSIC DOWNLOADER"
+APP_VERSION = "v2.0"
+GITHUB_URL  = "https://github.com/SEU_USUARIO"  # ← altere para o seu GitHub
+AUDIO_EXTS  = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".opus", ".aac", ".webm"}
+
+# ─────────────────────────────────────────────
+#  PALETTE  — Frutiger Aero / Y2K / Winamp
+# ─────────────────────────────────────────────
+C = {
+    # base
+    "bg_dark":     "#0a0e1a",
+    "bg_mid":      "#0d1428",
+    "panel":       "#111827",
+    "panel2":      "#192136",
+    # glass
+    "glass":       "#1a2744",
+    "glass_hi":    "#2a3f6e",
+    "glass_rim":   "#3d5a9a",
+    # neon / aero accents
+    "neon_cyan":   "#00e5ff",
+    "neon_green":  "#39ff14",
+    "neon_lime":   "#a8ff3e",
+    "neon_pink":   "#ff2d78",
+    "neon_blue":   "#1e90ff",
+    "sky_blue":    "#87ceeb",
+    "aero_white":  "#dff0ff",
+    # text
+    "text":        "#e8f4ff",
+    "text_muted":  "#6b8cae",
+    "text_dim":    "#3d5a7a",
+    # winamp orange
+    "win_orange":  "#ff8c00",
+    "win_yellow":  "#ffe000",
+    # status
+    "ok":          "#39ff14",
+    "warn":        "#ffe000",
+    "err":         "#ff2d78",
+}
+
+EQ_COLORS = [
+    "#00e5ff", "#1e90ff", "#1e90ff", "#3a6fff",
+    "#39ff14", "#39ff14", "#a8ff3e",
+    "#ffe000", "#ff8c00", "#ff2d78",
+]
+
+# ─────────────────────────────────────────────
+#  STATE
+# ─────────────────────────────────────────────
+download_folder: Path = Path.home() / "Músicas"
 ui_queue: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
 busy = False
-equalizer_tick = 0
+eq_tick = 0
+eq_heights = [4] * 20
+eq_target  = [4] * 20
 
 
+# ══════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════
 def open_path(path: Path):
     try:
         if os.name == "nt":
-            os.startfile(str(path))  # type: ignore[attr-defined]
+            os.startfile(str(path))
         elif sys.platform == "darwin":
             subprocess.Popen(["open", str(path)])
         else:
@@ -35,44 +138,79 @@ def open_path(path: Path):
 
 
 def pick_folder():
+    """Sempre pergunta a pasta de destino antes de baixar."""
     global download_folder
-    folder = filedialog.askdirectory(initialdir=str(download_folder))
+    folder = filedialog.askdirectory(
+        title="Escolha a pasta de destino",
+        initialdir=str(download_folder),
+    )
     if folder:
         download_folder = Path(folder)
         folder_var.set(str(download_folder))
         scan_library()
 
 
-def build_command(link: str, mode: str, folder: Path) -> list[str]:
+def build_command(link: str, mode: str, fmt: str, folder: Path) -> list[str]:
+    """
+    Monta o comando com as melhores flags de qualidade disponíveis.
+    fmt: 'mp3_320' | 'flac' | 'best'
+    """
     is_spotify = "spotify.com" in link
-    is_youtube = ("youtube.com" in link) or ("youtu.be" in link)
+    is_youtube = "youtube.com" in link or "youtu.be" in link
 
+    # ── SpotDL (Spotify) ──────────────────────────────────────────
     if mode == "spotify" or (mode == "auto" and is_spotify):
-        return ["spotdl", "--output", str(folder), link]
-
-    if mode == "youtube" or (mode == "auto" and is_youtube):
-        return [
-            "yt-dlp",
-            "-x",
-            "--audio-format", "mp3",
-            "--embed-metadata",
-            "--embed-thumbnail",
-            "-P", str(folder),
+        audio_fmt = "mp3" if fmt == "mp3_320" else ("flac" if fmt == "flac" else "mp3")
+        bitrate   = "320k" if fmt == "mp3_320" else "best"
+        cmd = [
+            "spotdl",
+            "--audio", "youtube-music",      # fonte de áudio
+            "--format", audio_fmt,
+            "--bitrate", bitrate,
+            "--output", str(folder),
+            "--save-file", "spotdl_tracks.spotdl",
             link,
         ]
+        return cmd
 
-    query = link if mode == "search" else f"ytsearch1:{link}"
-    return [
+    # ── yt-dlp (YouTube / busca) ──────────────────────────────────
+    if fmt == "flac":
+        audio_fmt   = "flac"
+        audio_quality = "0"          # lossless
+    elif fmt == "mp3_320":
+        audio_fmt   = "mp3"
+        audio_quality = "0"          # highest VBR / CBR
+    else:  # best (opus/m4a nativo)
+        audio_fmt   = "best"
+        audio_quality = "0"
+
+    base_cmd = [
         "yt-dlp",
         "-x",
-        "--audio-format", "mp3",
+        "--audio-format",   audio_fmt,
+        "--audio-quality",  audio_quality,
         "--embed-metadata",
         "--embed-thumbnail",
+        "--add-metadata",
+        "--parse-metadata", "%(title)s:%(meta_title)s",
+        "--parse-metadata", "%(uploader)s:%(meta_artist)s",
+        "--write-thumbnail",
+        "--convert-thumbnails", "jpg",
+        "--postprocessor-args", "ffmpeg:-id3v2_version 3",
         "-P", str(folder),
-        query,
     ]
 
+    if mode == "youtube" or (mode == "auto" and is_youtube):
+        return base_cmd + [link]
 
+    # busca textual
+    query = link if mode == "search" else f"ytsearch1:{link}"
+    return base_cmd + [query]
+
+
+# ══════════════════════════════════════════════
+#  UI HELPERS
+# ══════════════════════════════════════════════
 def append_log(text: str):
     log_box.configure(state="normal")
     log_box.insert("end", text + "\n")
@@ -80,85 +218,99 @@ def append_log(text: str):
     log_box.configure(state="disabled")
 
 
-def set_status(text: str):
+def set_status(text: str, color: str = C["text_muted"]):
     status_var.set(text)
+    status_lbl.configure(fg=color)
 
 
 def set_busy(value: bool):
     global busy
     busy = value
-    download_btn.configure(state="disabled" if value else "normal")
-    pick_btn.configure(state="disabled" if value else "normal")
-    open_btn.configure(state="disabled" if value else "normal")
-    refresh_btn.configure(state="disabled" if value else "normal")
-    clear_btn.configure(state="disabled" if value else "normal")
-    mode_auto.configure(state="disabled" if value else "normal")
-    mode_spotify.configure(state="disabled" if value else "normal")
-    mode_youtube.configure(state="disabled" if value else "normal")
-    mode_search.configure(state="disabled" if value else "normal")
-    link_entry.configure(state="disabled" if value else "normal")
+    state = "disabled" if value else "normal"
+    for w in (link_entry, download_btn, open_btn,
+              refresh_btn, clear_btn, copy_btn,
+              mode_auto, mode_spotify, mode_youtube, mode_search,
+              fmt_mp3, fmt_flac, fmt_best):
+        try:
+            w.configure(state=state)
+        except Exception:
+            pass
     if value:
-        progress.start(12)
+        progress.start(10)
     else:
         progress.stop()
+        progress["value"] = 0
 
 
+# ══════════════════════════════════════════════
+#  EQUALIZER ANIMATION
+# ══════════════════════════════════════════════
 def tick_equalizer():
-    global equalizer_tick
-    canvas.delete("all")
-    w = max(canvas.winfo_width(), 260)
-    h = max(canvas.winfo_height(), 72)
-    bars = 10
-    spacing = 6
-    bar_w = (w - (bars + 1) * spacing) / bars
-    base = h - 10
+    global eq_tick, eq_heights, eq_target
+    eq_canvas.delete("all")
+    w = max(eq_canvas.winfo_width(), 260)
+    h = max(eq_canvas.winfo_height(), 60)
+    bars    = 20
+    spacing = 3
+    bar_w   = (w - (bars + 1) * spacing) / bars
+    base    = h - 4
 
     if busy:
-        equalizer_tick = (equalizer_tick + 1) % 20
-        pattern = [8, 20, 34, 16, 40, 12, 28, 18, 36, 14]
-        heights = [pattern[(i + equalizer_tick) % len(pattern)] for i in range(bars)]
+        eq_tick = (eq_tick + 1) % 60
+        for i in range(bars):
+            # smooth random movement
+            if eq_tick % 4 == 0:
+                phase    = (i / bars) * 2 * math.pi
+                wave     = math.sin(phase + eq_tick * 0.25) * 18
+                eq_target[i] = max(6, min(h - 10, int(20 + wave + (i % 3) * 5)))
+            # lerp
+            diff = eq_target[i] - eq_heights[i]
+            eq_heights[i] = eq_heights[i] + diff * 0.3
     else:
-        heights = [10] * bars
+        for i in range(bars):
+            eq_heights[i] = max(4, eq_heights[i] * 0.85)
 
     for i in range(bars):
-        x0 = spacing + i * (bar_w + spacing)
-        x1 = x0 + bar_w
-        y0 = base - min(heights[i], h - 20)
-        y1 = base
-        canvas.create_rectangle(x0, y0, x1, y1, outline="", fill=accent_color)
+        x0  = spacing + i * (bar_w + spacing)
+        x1  = x0 + bar_w
+        h_b = max(4, int(eq_heights[i]))
+        y0  = base - h_b
+        y1  = base
+        col = EQ_COLORS[i % len(EQ_COLORS)]
+        # bar body
+        eq_canvas.create_rectangle(x0, y0, x1, y1, outline="", fill=col)
+        # top reflection highlight
+        eq_canvas.create_rectangle(x0, y0, x1, y0 + 2, outline="", fill="#ffffff44")
+        # peak dot
+        eq_canvas.create_rectangle(x0, y0 - 3, x1, y0 - 1, outline="", fill=col)
 
-    root.after(120, tick_equalizer)
+    root.after(40, tick_equalizer)
 
 
-def poll_queue():
-    try:
-        while True:
-            kind, payload = ui_queue.get_nowait()
-            if kind == "log" and payload is not None:
-                append_log(payload)
-            elif kind == "status" and payload is not None:
-                set_status(payload)
-            elif kind == "done":
-                set_busy(False)
-                scan_library()
-    except queue.Empty:
-        pass
-    root.after(120, poll_queue)
-
+# ══════════════════════════════════════════════
+#  DOWNLOAD
+# ══════════════════════════════════════════════
 
 def run_download():
+    global download_folder  
     link = link_var.get().strip()
     if not link:
-        messagebox.showwarning("Aviso", "Cole um link ou uma busca primeiro.")
+        messagebox.showwarning("Aviso", "Cole um link, URL ou termo de busca primeiro.")
         return
 
-    folder = download_folder
-    folder.mkdir(parents=True, exist_ok=True)
-    cmd = build_command(link, mode_var.get(), folder)
+    folder = filedialog.askdirectory(
+        title="Escolha onde salvar o arquivo",
+        initialdir=str(download_folder),
+    )
+    download_folder = Path(folder)
+    folder_var.set(str(download_folder))
+    download_folder.mkdir(parents=True, exist_ok=True)
+
+    cmd = build_command(link, mode_var.get(), fmt_var.get(), download_folder)
 
     set_busy(True)
-    set_status("Preparando download...")
-    append_log(f"> {' '.join(cmd)}")
+    set_status("Iniciando download...", C["neon_cyan"])
+    append_log(f"❯ {' '.join(cmd)}")
 
     def worker():
         try:
@@ -170,30 +322,33 @@ def run_download():
                 bufsize=1,
                 universal_newlines=True,
             )
-
             assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.rstrip()
                 if line:
                     ui_queue.put(("log", line))
+                    if "%" in line or "download" in line.lower():
+                        ui_queue.put(("status_ok", "Baixando..."))
 
             code = proc.wait()
             if code == 0:
-                ui_queue.put(("status", "Download concluído."))
+                ui_queue.put(("status_ok", "✔ Download concluído!"))
+                ui_queue.put(("log", "─" * 48))
             else:
-                ui_queue.put(("status", f"Finalizado com erro (código {code})."))
+                ui_queue.put(("status_err", f"Finalizado com erro (código {code})."))
                 ui_queue.put(("log", f"Processo retornou código {code}."))
         except FileNotFoundError as exc:
-            ui_queue.put(("status", "Ferramenta não encontrada."))
+            ui_queue.put(("status_err", "Ferramenta não encontrada no PATH."))
             ui_queue.put(("log", f"Erro: {exc}"))
             messagebox.showerror(
-                "Erro",
-                "yt-dlp ou spotdl não foi encontrado no sistema.\n"
-                "Instale a ferramenta e deixe no PATH."
+                "Ferramenta não encontrada",
+                "yt-dlp ou spotdl não está instalado ou não está no PATH.\n\n"
+                "Instale com:\n  pip install yt-dlp spotdl\n\n"
+                "E certifique-se que o ffmpeg está no PATH.",
             )
         except Exception as exc:
-            ui_queue.put(("status", "Erro durante o download."))
-            ui_queue.put(("log", f"Erro: {exc}"))
+            ui_queue.put(("status_err", "Erro durante o download."))
+            ui_queue.put(("log", f"Erro inesperado: {exc}"))
             messagebox.showerror("Erro", str(exc))
         finally:
             ui_queue.put(("done", None))
@@ -201,57 +356,73 @@ def run_download():
     threading.Thread(target=worker, daemon=True).start()
 
 
+# ══════════════════════════════════════════════
+#  QUEUE POLLING
+# ══════════════════════════════════════════════
+def poll_queue():
+    try:
+        while True:
+            kind, payload = ui_queue.get_nowait()
+            if kind == "log" and payload:
+                append_log(payload)
+            elif kind == "status_ok" and payload:
+                set_status(payload, C["neon_green"])
+            elif kind == "status_err" and payload:
+                set_status(payload, C["err"])
+            elif kind == "done":
+                set_busy(False)
+                scan_library()
+                set_status("Pronto.", C["text_muted"])
+    except queue.Empty:
+        pass
+    root.after(100, poll_queue)
+
+
+# ══════════════════════════════════════════════
+#  METADATA
+# ══════════════════════════════════════════════
 def get_metadata(path: Path) -> dict[str, str]:
     info: dict[str, str] = {
         "Arquivo": path.name,
         "Caminho": str(path),
         "Tamanho": f"{path.stat().st_size / (1024 * 1024):.2f} MB",
     }
-
     if MutagenFile is None:
-        info["Metadados"] = "Instale mutagen para ler tags."
+        info["Metadados"] = "Instale mutagen: pip install mutagen"
         return info
-
     try:
         audio = MutagenFile(path)
         if audio is None:
             info["Metadados"] = "Não foi possível ler o arquivo."
             return info
-
         if getattr(audio, "tags", None):
-            for key in ("title", "artist", "album", "genre", "date", "tracknumber"):
+            for key in ("title", "artist", "album", "date", "genre",
+                        "tracknumber", "albumartist", "composer", "comment"):
                 try:
                     value = audio.tags.get(key)
                     if value:
-                        info[key.capitalize()] = str(value[0]) if isinstance(value, list) else str(value)
+                        info[key.capitalize()] = (
+                            str(value[0]) if isinstance(value, list) else str(value)
+                        )
                 except Exception:
                     pass
-
-        try:
-            if hasattr(audio, "info") and audio.info is not None:
-                length = getattr(audio.info, "length", None)
-                bitrate = getattr(audio.info, "bitrate", None)
-                if length:
-                    mins = int(length // 60)
-                    secs = int(length % 60)
-                    info["Duração"] = f"{mins:02d}:{secs:02d}"
-                if bitrate:
-                    info["Bitrate"] = f"{int(bitrate / 1000)} kbps"
-        except Exception:
-            pass
-
+        if hasattr(audio, "info") and audio.info is not None:
+            length  = getattr(audio.info, "length",  None)
+            bitrate = getattr(audio.info, "bitrate", None)
+            sample  = getattr(audio.info, "sample_rate", None)
+            if length:
+                mins = int(length // 60)
+                secs = int(length % 60)
+                info["Duração"] = f"{mins:02d}:{secs:02d}"
+            if bitrate:
+                info["Bitrate"] = f"{int(bitrate / 1000)} kbps"
+            if sample:
+                info["Sample rate"] = f"{sample} Hz"
         if len(info) <= 3:
             info["Metadados"] = "Arquivo sem tags detectáveis."
     except Exception as exc:
         info["Metadados"] = f"Erro ao ler tags: {exc}"
-
     return info
-
-
-def clear_details():
-    details_text.configure(state="normal")
-    details_text.delete("1.0", "end")
-    details_text.configure(state="disabled")
 
 
 def show_metadata(path_str: str):
@@ -259,26 +430,49 @@ def show_metadata(path_str: str):
     if not path.exists():
         return
     meta = get_metadata(path)
-    clear_details()
     details_text.configure(state="normal")
+    details_text.delete("1.0", "end")
     for k, v in meta.items():
-        details_text.insert("end", f"{k}: {v}\n")
+        details_text.insert("end", f"  {k}:\n", "key")
+        details_text.insert("end", f"  {v}\n\n", "val")
     details_text.configure(state="disabled")
+
+    # thumbnail
+    if PIL_AVAILABLE:
+        thumb_canvas.delete("all")
+        # look for .jpg next to the audio file
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            thumb_path = path.with_suffix(ext)
+            if thumb_path.exists():
+                try:
+                    img = Image.open(thumb_path).resize((160, 160))
+                    photo = ImageTk.PhotoImage(img)
+                    thumb_canvas._photo = photo  # keep reference
+                    thumb_canvas.create_image(80, 80, image=photo)
+                except Exception:
+                    pass
+                break
 
 
 def scan_library():
     library_tree.delete(*library_tree.get_children())
     if not download_folder.exists():
         return
-
-    files = [p for p in download_folder.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXTS]
+    files = [
+        p for p in download_folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+    ]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
     for p in files:
         size_mb = p.stat().st_size / (1024 * 1024)
-        library_tree.insert("", "end", values=(p.name, p.suffix.upper().lstrip("."), f"{size_mb:.2f} MB", str(p)))
-
-    set_status(f"{len(files)} arquivo(s) de áudio encontrado(s).")
+        library_tree.insert(
+            "", "end",
+            values=(p.name, p.suffix.upper().lstrip("."),
+                    f"{size_mb:.2f} MB", str(p)),
+        )
+    count = len(files)
+    lib_count_var.set(f"{count} arquivo(s)")
+    set_status(f"{count} arquivo(s) de áudio na pasta.", C["text_muted"])
 
 
 def on_select_file(_event=None):
@@ -304,198 +498,441 @@ def copy_selected_path():
     if values and len(values) >= 4:
         root.clipboard_clear()
         root.clipboard_append(values[3])
-        set_status("Caminho copiado para a área de transferência.")
+        set_status("Caminho copiado.", C["neon_green"])
 
 
-# -------- UI --------
-bg = "#17181b"
-panel = "#22252a"
-panel2 = "#2b2f36"
-text = "#e9edf2"
-muted = "#aab2bd"
-accent_color = "#43d17a"
+# ══════════════════════════════════════════════
+#  CANVAS HELPERS (glass buttons)
+# ══════════════════════════════════════════════
+def rounded_rect(canvas, x1, y1, x2, y2, r=12, **kw):
+    points = [
+        x1+r, y1, x2-r, y1,
+        x2, y1, x2, y1+r,
+        x2, y2-r, x2, y2,
+        x2-r, y2, x1+r, y2,
+        x1, y2, x1, y2-r,
+        x1, y1+r, x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kw)
 
+
+# ══════════════════════════════════════════════
+#  ROOT WINDOW
+# ══════════════════════════════════════════════
 root = tk.Tk()
-root.title(APP_TITLE)
-root.geometry("1080x720")
-root.minsize(980, 640)
-root.configure(bg=bg)
+root.title(f"{APP_TITLE}  {APP_VERSION}")
+root.geometry("1100x740")
+root.minsize(980, 680)
+root.configure(bg=C["bg_dark"])
 
+# ── custom font fallback ──
+FONT_MONO  = ("Courier New", 9)
+FONT_UI    = ("Segoe UI", 10)
+FONT_TITLE = ("Segoe UI", 20, "bold")
+FONT_SUB   = ("Segoe UI", 9)
+FONT_LABEL = ("Segoe UI", 9, "bold")
+
+# ── ttk style ──
 style = ttk.Style()
 style.theme_use("clam")
-style.configure(".", background=bg, foreground=text, fieldbackground=panel2)
-style.configure("TFrame", background=bg)
-style.configure("Card.TFrame", background=panel, relief="flat")
-style.configure("Header.TLabel", background=bg, foreground=text, font=("Segoe UI", 18, "bold"))
-style.configure("Sub.TLabel", background=bg, foreground=muted, font=("Segoe UI", 10))
-style.configure("Card.TLabel", background=panel, foreground=text, font=("Segoe UI", 10))
-style.configure("TLabel", background=bg, foreground=text, font=("Segoe UI", 10))
-style.configure("TButton", font=("Segoe UI", 10, "bold"), padding=8)
-style.map("TButton", background=[("active", "#323844")])
-style.configure("Accent.TButton", background=accent_color, foreground="#101010")
-style.map("Accent.TButton", background=[("active", "#65e08d")])
-style.configure("TEntry", fieldbackground=panel2, foreground=text, insertcolor=text)
-style.configure("Treeview", background=panel2, fieldbackground=panel2, foreground=text, rowheight=28)
-style.configure("Treeview.Heading", background=panel, foreground=text, font=("Segoe UI", 10, "bold"))
-style.map("Treeview", background=[("selected", "#3c4452")])
+style.configure(".",
+    background=C["bg_dark"],
+    foreground=C["text"],
+    fieldbackground=C["panel2"],
+    troughcolor=C["panel"],
+    bordercolor=C["glass_rim"],
+    selectbackground=C["glass_hi"],
+    selectforeground=C["text"],
+)
+style.configure("TFrame",        background=C["bg_dark"])
+style.configure("Glass.TFrame",  background=C["glass"],  relief="flat")
+style.configure("TLabel",        background=C["bg_dark"], foreground=C["text"],       font=FONT_UI)
+style.configure("Muted.TLabel",  background=C["bg_dark"], foreground=C["text_muted"], font=FONT_SUB)
+style.configure("Glass.TLabel",  background=C["glass"],   foreground=C["text"],       font=FONT_UI)
 
-main = ttk.Frame(root, padding=14)
+style.configure("TEntry",
+    fieldbackground=C["bg_mid"],
+    foreground=C["neon_cyan"],
+    insertcolor=C["neon_cyan"],
+    borderwidth=2,
+    relief="flat",
+    font=("Segoe UI", 12),
+)
+
+style.configure("TButton",
+    font=FONT_UI,
+    padding=7,
+    background=C["glass"],
+    foreground=C["aero_white"],
+    relief="flat",
+    borderwidth=1,
+)
+style.map("TButton",
+    background=[("active", C["glass_hi"]), ("disabled", C["panel"])],
+    foreground=[("disabled", C["text_dim"])],
+)
+
+style.configure("Accent.TButton",
+    font=("Segoe UI", 11, "bold"),
+    padding=10,
+    background=C["neon_cyan"],
+    foreground=C["bg_dark"],
+    relief="flat",
+)
+style.map("Accent.TButton",
+    background=[("active", C["sky_blue"]), ("disabled", C["panel"])],
+    foreground=[("disabled", C["text_dim"])],
+)
+
+style.configure("Danger.TButton",
+    font=FONT_UI,
+    padding=7,
+    background="#3a0a18",
+    foreground=C["neon_pink"],
+    relief="flat",
+)
+style.map("Danger.TButton",
+    background=[("active", "#55102a")],
+)
+
+style.configure("Treeview",
+    background=C["bg_mid"],
+    fieldbackground=C["bg_mid"],
+    foreground=C["text"],
+    rowheight=26,
+    font=FONT_UI,
+)
+style.configure("Treeview.Heading",
+    background=C["glass"],
+    foreground=C["neon_cyan"],
+    font=FONT_LABEL,
+    relief="flat",
+)
+style.map("Treeview",
+    background=[("selected", C["glass_hi"])],
+    foreground=[("selected", C["neon_cyan"])],
+)
+
+style.configure("TRadiobutton",
+    background=C["bg_dark"],
+    foreground=C["text"],
+    font=FONT_UI,
+    indicatorcolor=C["neon_cyan"],
+)
+style.map("TRadiobutton",
+    background=[("active", C["bg_dark"])],
+    indicatorcolor=[("selected", C["neon_cyan"])],
+)
+
+style.configure("TProgressbar",
+    troughcolor=C["panel"],
+    background=C["neon_cyan"],
+    thickness=4,
+)
+
+style.configure("TScrollbar",
+    background=C["panel2"],
+    troughcolor=C["panel"],
+    arrowcolor=C["text_dim"],
+    borderwidth=0,
+)
+
+
+# ══════════════════════════════════════════════
+#  LAYOUT
+# ══════════════════════════════════════════════
+
+main = ttk.Frame(root, padding=10)
 main.pack(fill="both", expand=True)
 
-header = ttk.Frame(main)
-header.pack(fill="x", pady=(0, 10))
+# ── HEADER ────────────────────────────────────
+header = tk.Frame(main, bg=C["bg_dark"])
+header.pack(fill="x", pady=(0, 8))
 
-title_wrap = ttk.Frame(header)
-title_wrap.pack(side="left", fill="x", expand=True)
+# title block with neon glow effect via layered labels
+title_frame = tk.Frame(header, bg=C["bg_dark"])
+title_frame.pack(side="left")
 
-ttk.Label(title_wrap, text="Retro Music Downloader", style="Header.TLabel").pack(anchor="w")
-ttk.Label(
-    title_wrap,
-    text="Baixe músicas, veja sua biblioteca local e consulte metadados sem sair da interface.",
-    style="Sub.TLabel"
-).pack(anchor="w", pady=(3, 0))
+tk.Label(
+    title_frame,
+    text="◈ AERO MUSIC",
+    font=("Segoe UI", 22, "bold"),
+    fg=C["neon_cyan"],
+    bg=C["bg_dark"],
+).pack(anchor="w")
 
+tk.Label(
+    title_frame,
+    text="DOWNLOADER  " + APP_VERSION,
+    font=("Segoe UI", 10),
+    fg=C["text_muted"],
+    bg=C["bg_dark"],
+).pack(anchor="w")
+
+# github link
+gh_btn = tk.Label(
+    header,
+    text="[ GitHub ]",
+    font=("Segoe UI", 9, "underline"),
+    fg=C["neon_blue"],
+    bg=C["bg_dark"],
+    cursor="hand2",
+)
+gh_btn.pack(side="right", padx=12)
+gh_btn.bind("<Button-1>", lambda e: webbrowser.open(GITHUB_URL))
+
+# status
 status_var = tk.StringVar(value="Pronto.")
-ttk.Label(header, textvariable=status_var, style="Sub.TLabel").pack(side="right", padx=8, pady=8)
+status_lbl = tk.Label(
+    header,
+    textvariable=status_var,
+    font=FONT_SUB,
+    fg=C["text_muted"],
+    bg=C["bg_dark"],
+)
+status_lbl.pack(side="right", padx=8)
 
-controls = ttk.Frame(main)
-controls.pack(fill="x", pady=(0, 10))
+# progress bar
+progress = ttk.Progressbar(main, mode="indeterminate", style="TProgressbar")
+progress.pack(fill="x", pady=(0, 8))
 
-input_card = ttk.Frame(controls, style="Card.TFrame", padding=12)
-input_card.pack(side="left", fill="both", expand=True, padx=(0, 10))
+# ── TOP AREA (input + eq) ─────────────────────
+top = tk.Frame(main, bg=C["bg_dark"])
+top.pack(fill="x", pady=(0, 8))
 
-ttk.Label(input_card, text="Link, busca ou playlist").pack(anchor="w")
+# input card
+input_card = tk.Frame(top, bg=C["glass"], bd=0, relief="flat",
+                       highlightbackground=C["glass_rim"], highlightthickness=1)
+input_card.pack(side="left", fill="both", expand=True, padx=(0, 8), ipadx=12, ipady=10)
+
+tk.Label(input_card, text="LINK / URL / BUSCA",
+         font=FONT_LABEL, fg=C["neon_cyan"], bg=C["glass"]).pack(anchor="w", padx=12, pady=(10, 2))
+
 link_var = tk.StringVar()
-link_entry = ttk.Entry(input_card, textvariable=link_var, font=("Segoe UI", 11))
-link_entry.pack(fill="x", pady=(6, 10))
+link_entry = tk.Entry(
+    input_card,
+    textvariable=link_var,
+    font=("Courier New", 12),
+    bg=C["bg_dark"],
+    fg=C["neon_cyan"],
+    insertbackground=C["neon_cyan"],
+    relief="flat",
+    bd=6,
+    highlightthickness=1,
+    highlightcolor=C["glass_rim"],
+    highlightbackground=C["panel"],
+)
+link_entry.pack(fill="x", padx=12, pady=(0, 10))
 link_entry.focus()
 
+# mode + format row
+row2 = tk.Frame(input_card, bg=C["glass"])
+row2.pack(fill="x", padx=12, pady=(0, 10))
+
 mode_var = tk.StringVar(value="auto")
-mode_frame = ttk.Frame(input_card)
-mode_frame.pack(fill="x", pady=(0, 10))
+tk.Label(row2, text="MODO:", font=FONT_LABEL, fg=C["text_muted"], bg=C["glass"]).pack(side="left")
+mode_auto = ttk.Radiobutton(row2, text="Auto", variable=mode_var, value="auto")
+mode_spotify = ttk.Radiobutton(row2, text="Spotify", variable=mode_var, value="spotify")
+mode_youtube = ttk.Radiobutton(row2, text="YouTube", variable=mode_var, value="youtube")
+mode_search = ttk.Radiobutton(row2, text="Busca", variable=mode_var, value="search")
 
-mode_auto = ttk.Radiobutton(mode_frame, text="Auto", variable=mode_var, value="auto")
-mode_spotify = ttk.Radiobutton(mode_frame, text="Spotify", variable=mode_var, value="spotify")
-mode_youtube = ttk.Radiobutton(mode_frame, text="YouTube", variable=mode_var, value="youtube")
-mode_search = ttk.Radiobutton(mode_frame, text="Busca", variable=mode_var, value="search")
-for widget in (mode_auto, mode_spotify, mode_youtube, mode_search):
-    widget.pack(side="left", padx=(0, 12))
+for w in (mode_auto, mode_spotify, mode_youtube, mode_search):
+    w.pack(side="left", padx=(6, 0))
 
-buttons = ttk.Frame(input_card)
-buttons.pack(fill="x")
+row3 = tk.Frame(input_card, bg=C["glass"])
+row3.pack(fill="x", padx=12, pady=(0, 10))
 
-download_btn = ttk.Button(buttons, text="Baixar", style="Accent.TButton", command=run_download)
+fmt_var = tk.StringVar(value="mp3_320")
+tk.Label(row3, text="FORMATO:", font=FONT_LABEL, fg=C["text_muted"], bg=C["glass"]).pack(side="left")
+fmt_mp3  = ttk.Radiobutton(row3, text="MP3 320kbps", variable=fmt_var, value="mp3_320")
+fmt_flac = ttk.Radiobutton(row3, text="FLAC (lossless)", variable=fmt_var, value="flac")
+fmt_best = ttk.Radiobutton(row3, text="Melhor nativo", variable=fmt_var, value="best")
+for w in (fmt_mp3, fmt_flac, fmt_best):
+    w.pack(side="left", padx=(6, 0))
+
+# buttons
+btn_row = tk.Frame(input_card, bg=C["glass"])
+btn_row.pack(fill="x", padx=12, pady=(0, 10))
+
+download_btn = ttk.Button(
+    btn_row, text="⬇  BAIXAR",
+    style="Accent.TButton",
+    command=run_download,
+)
 download_btn.pack(side="left")
 
-pick_btn = ttk.Button(buttons, text="Escolher pasta", command=pick_folder)
-pick_btn.pack(side="left", padx=8)
+open_btn = ttk.Button(btn_row, text="📂 Abrir pasta",
+                       command=lambda: open_path(download_folder))
+open_btn.pack(side="left", padx=6)
 
-open_btn = ttk.Button(buttons, text="Abrir pasta", command=lambda: open_path(download_folder))
-open_btn.pack(side="left")
+refresh_btn = ttk.Button(btn_row, text="↻ Atualizar",
+                          command=scan_library)
+refresh_btn.pack(side="left")
 
-refresh_btn = ttk.Button(buttons, text="Atualizar biblioteca", command=scan_library)
-refresh_btn.pack(side="left", padx=8)
+clear_btn = ttk.Button(btn_row, text="✕ Limpar log",
+                        style="Danger.TButton",
+                        command=clear_log)
+clear_btn.pack(side="right")
 
-folder_card = ttk.Frame(controls, style="Card.TFrame", padding=12, width=320)
-folder_card.pack(side="right", fill="y")
-folder_card.pack_propagate(False)
+# eq + folder card
+right_top = tk.Frame(top, bg=C["bg_dark"])
+right_top.pack(side="right", fill="y")
 
-ttk.Label(folder_card, text="Destino").pack(anchor="w")
+# equalizer
+eq_frame = tk.Frame(right_top, bg=C["glass"],
+                    highlightbackground=C["glass_rim"], highlightthickness=1)
+eq_frame.pack(fill="x", pady=(0, 6), ipadx=6, ipady=6)
+
+tk.Label(eq_frame, text="EQUALIZER", font=FONT_LABEL,
+         fg=C["neon_cyan"], bg=C["glass"]).pack(anchor="w", padx=8, pady=(6, 2))
+
+eq_canvas = tk.Canvas(eq_frame, height=60, width=280, bg=C["bg_dark"],
+                       highlightthickness=0)
+eq_canvas.pack(padx=8, pady=(0, 8))
+
+# folder card
+folder_card = tk.Frame(right_top, bg=C["glass"],
+                        highlightbackground=C["glass_rim"], highlightthickness=1)
+folder_card.pack(fill="x", ipadx=6, ipady=6)
+
+tk.Label(folder_card, text="PASTA DE DESTINO", font=FONT_LABEL,
+         fg=C["neon_cyan"], bg=C["glass"]).pack(anchor="w", padx=8, pady=(6, 2))
+
 folder_var = tk.StringVar(value=str(download_folder))
-ttk.Label(folder_card, textvariable=folder_var, wraplength=300, style="Card.TLabel").pack(anchor="w", pady=(6, 8))
+tk.Label(folder_card, textvariable=folder_var,
+         font=("Segoe UI", 8), fg=C["text_muted"], bg=C["glass"],
+         wraplength=270, justify="left").pack(anchor="w", padx=8, pady=(0, 6))
 
-canvas = tk.Canvas(folder_card, height=72, bg=panel, highlightthickness=0)
-canvas.pack(fill="x", pady=(4, 0))
-
-mid = ttk.Frame(main)
+# ── MID AREA (library + details/log) ─────────
+mid = tk.Frame(main, bg=C["bg_dark"])
 mid.pack(fill="both", expand=True)
 
-left = ttk.Frame(mid, style="Card.TFrame", padding=12)
-left.pack(side="left", fill="both", expand=True, padx=(0, 10))
+# library
+lib_frame = tk.Frame(mid, bg=C["glass"],
+                      highlightbackground=C["glass_rim"], highlightthickness=1)
+lib_frame.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
-right = ttk.Frame(mid, style="Card.TFrame", padding=12, width=340)
-right.pack(side="right", fill="y")
-right.pack_propagate(False)
+lib_header = tk.Frame(lib_frame, bg=C["glass"])
+lib_header.pack(fill="x", padx=10, pady=(8, 4))
 
-ttk.Label(left, text="Biblioteca local").pack(anchor="w")
+tk.Label(lib_header, text="BIBLIOTECA LOCAL", font=FONT_LABEL,
+         fg=C["neon_cyan"], bg=C["glass"]).pack(side="left")
+lib_count_var = tk.StringVar(value="0 arquivo(s)")
+tk.Label(lib_header, textvariable=lib_count_var, font=FONT_SUB,
+         fg=C["text_muted"], bg=C["glass"]).pack(side="right")
 
-tree_frame = ttk.Frame(left)
-tree_frame.pack(fill="both", expand=True, pady=(8, 0))
+tree_wrap = tk.Frame(lib_frame, bg=C["glass"])
+tree_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 6))
 
 columns = ("nome", "tipo", "tamanho", "path")
-library_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
-for col, text_col, width in [
-    ("nome", "Nome", 320),
-    ("tipo", "Tipo", 70),
-    ("tamanho", "Tamanho", 90),
-    ("path", "Caminho", 420),
+library_tree = ttk.Treeview(tree_wrap, columns=columns,
+                              show="headings", selectmode="browse")
+for col, head, width in [
+    ("nome",    "Nome",     300),
+    ("tipo",    "Tipo",      60),
+    ("tamanho", "Tamanho",   90),
+    ("path",    "Caminho",  380),
 ]:
-    library_tree.heading(col, text=text_col)
+    library_tree.heading(col, text=head)
     library_tree.column(col, width=width, anchor="w")
 
-ys = ttk.Scrollbar(tree_frame, orient="vertical", command=library_tree.yview)
-xs = ttk.Scrollbar(tree_frame, orient="horizontal", command=library_tree.xview)
+ys = ttk.Scrollbar(tree_wrap, orient="vertical",   command=library_tree.yview)
+xs = ttk.Scrollbar(tree_wrap, orient="horizontal",  command=library_tree.xview)
 library_tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
-
 library_tree.grid(row=0, column=0, sticky="nsew")
 ys.grid(row=0, column=1, sticky="ns")
 xs.grid(row=1, column=0, sticky="ew")
-tree_frame.rowconfigure(0, weight=1)
-tree_frame.columnconfigure(0, weight=1)
+tree_wrap.rowconfigure(0, weight=1)
+tree_wrap.columnconfigure(0, weight=1)
 
 library_tree.bind("<<TreeviewSelect>>", on_select_file)
-library_tree.bind("<Double-1>", on_select_file)
+library_tree.bind("<Double-1>", lambda e: (
+    on_select_file(), open_path(Path(library_tree.item(library_tree.selection()[0], "values")[3]))
+    if library_tree.selection() else None
+))
 
-lib_actions = ttk.Frame(left)
-lib_actions.pack(fill="x", pady=(10, 0))
+lib_actions = tk.Frame(lib_frame, bg=C["glass"])
+lib_actions.pack(fill="x", padx=8, pady=(0, 8))
 
-copy_btn = ttk.Button(lib_actions, text="Copiar caminho", command=copy_selected_path)
+copy_btn = ttk.Button(lib_actions, text="⎘ Copiar caminho", command=copy_selected_path)
 copy_btn.pack(side="left")
 
-clear_btn = ttk.Button(lib_actions, text="Limpar log", command=clear_log)
-clear_btn.pack(side="left", padx=8)
+# right panel
+right_panel = tk.Frame(mid, bg=C["glass"], width=300,
+                        highlightbackground=C["glass_rim"], highlightthickness=1)
+right_panel.pack(side="right", fill="y")
+right_panel.pack_propagate(False)
 
-ttk.Label(right, text="Metadados").pack(anchor="w")
+# thumbnail
+tk.Label(right_panel, text="CAPA", font=FONT_LABEL,
+         fg=C["neon_cyan"], bg=C["glass"]).pack(anchor="w", padx=10, pady=(8, 2))
+
+thumb_canvas = tk.Canvas(right_panel, width=160, height=160,
+                           bg=C["bg_dark"], highlightthickness=1,
+                           highlightbackground=C["glass_rim"])
+thumb_canvas.pack(padx=10, pady=(0, 8))
+thumb_canvas.create_text(80, 80, text="sem capa",
+                          fill=C["text_dim"], font=FONT_SUB)
+
+# metadata
+tk.Label(right_panel, text="METADADOS", font=FONT_LABEL,
+         fg=C["neon_cyan"], bg=C["glass"]).pack(anchor="w", padx=10, pady=(0, 2))
+
 details_text = tk.Text(
-    right,
-    height=12,
+    right_panel,
+    height=9,
     wrap="word",
-    bg=panel2,
-    fg=text,
-    insertbackground=text,
+    bg=C["bg_mid"],
+    fg=C["text"],
+    insertbackground=C["text"],
     relief="flat",
-    padx=10,
-    pady=10,
+    padx=8,
+    pady=8,
+    font=FONT_SUB,
 )
-details_text.pack(fill="x", pady=(8, 10))
+details_text.tag_configure("key", foreground=C["neon_cyan"],   font=("Segoe UI", 8, "bold"))
+details_text.tag_configure("val", foreground=C["aero_white"],  font=("Courier New", 8))
+details_text.pack(fill="x", padx=8, pady=(0, 8))
 details_text.configure(state="disabled")
 
-ttk.Label(right, text="Log").pack(anchor="w")
+# log
+tk.Label(right_panel, text="LOG", font=FONT_LABEL,
+         fg=C["neon_cyan"], bg=C["glass"]).pack(anchor="w", padx=10, pady=(0, 2))
+
 log_box = tk.Text(
-    right,
-    height=14,
+    right_panel,
     wrap="word",
-    bg=panel2,
-    fg=text,
-    insertbackground=text,
+    bg=C["bg_dark"],
+    fg=C["neon_green"],
+    insertbackground=C["neon_green"],
     relief="flat",
-    padx=10,
-    pady=10,
+    padx=8,
+    pady=8,
+    font=FONT_MONO,
 )
-log_box.pack(fill="both", expand=True, pady=(8, 0))
+log_box.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 log_box.configure(state="disabled")
 
-bottom = ttk.Frame(main)
-bottom.pack(fill="x", pady=(10, 0))
+# ── BOTTOM BAR ────────────────────────────────
+bottom = tk.Frame(main, bg=C["bg_dark"])
+bottom.pack(fill="x", pady=(6, 0))
 
-progress = ttk.Progressbar(bottom, mode="indeterminate")
-progress.pack(side="left", fill="x", expand=True, padx=(0, 10))
+tk.Label(
+    bottom,
+    text="Enter para baixar  ·  duplo-clique para abrir arquivo  ·  MIT License  ·  " + GITHUB_URL,
+    font=("Segoe UI", 8),
+    fg=C["text_dim"],
+    bg=C["bg_dark"],
+).pack(side="left")
 
-ttk.Label(bottom, text="Enter para baixar", style="Sub.TLabel").pack(side="left")
-ttk.Button(bottom, text="Sair", command=root.destroy).pack(side="right")
+ttk.Button(bottom, text="✕ Sair", style="Danger.TButton",
+           command=root.destroy).pack(side="right")
 
+# ── keybind ──
 root.bind("<Return>", lambda e: run_download())
-root.after(120, poll_queue)
-root.after(120, tick_equalizer)
+
+# ── start loops ──
+root.after(100, poll_queue)
+root.after(100, tick_equalizer)
 scan_library()
 root.mainloop()
