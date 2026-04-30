@@ -71,44 +71,50 @@ APP_VERSION = "v2.0"
 GITHUB_URL  = "https://github.com/SEU_USUARIO"  # ← altere para o seu GitHub
 AUDIO_EXTS  = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".opus", ".aac", ".webm"}
 
+
 # ─────────────────────────────────────────────
-#  PALETTE  — Frutiger Aero / Y2K / Winamp
+#  PALETTE — Pastel Aero (clean / moderno)
 # ─────────────────────────────────────────────
 C = {
-    # base
-    "bg_dark":     "#0a0e1a",
-    "bg_mid":      "#0d1428",
-    "panel":       "#111827",
-    "panel2":      "#192136",
-    # glass
-    "glass":       "#1a2744",
-    "glass_hi":    "#2a3f6e",
-    "glass_rim":   "#3d5a9a",
-    # neon / aero accents
-    "neon_cyan":   "#00e5ff",
-    "neon_green":  "#39ff14",
-    "neon_lime":   "#a8ff3e",
-    "neon_pink":   "#ff2d78",
-    "neon_blue":   "#1e90ff",
-    "sky_blue":    "#87ceeb",
-    "aero_white":  "#dff0ff",
-    # text
-    "text":        "#e8f4ff",
-    "text_muted":  "#6b8cae",
-    "text_dim":    "#3d5a7a",
-    # winamp orange
-    "win_orange":  "#ff8c00",
-    "win_yellow":  "#ffe000",
-    # status
-    "ok":          "#39ff14",
-    "warn":        "#ffe000",
-    "err":         "#ff2d78",
+    # base (claros e neutros)
+    "bg_dark":     "#F4F7FB",
+    "bg_mid":      "#EEF3F9",
+    "panel":       "#FFFFFF",
+    "panel2":      "#F7FAFD",
+
+    # glass (bem suave agora)
+    "glass":       "#E6EEF8",
+    "glass_hi":    "#D6E4F5",
+    "glass_rim":   "#C3D6EE",
+
+    # accents (pastel)
+    "neon_cyan":   "#A7E9F2",
+    "neon_green":  "#B8F2C2",
+    "neon_lime":   "#D7F7A8",
+    "neon_pink":   "#F7C1CF",
+    "neon_blue":   "#B8CFF5",
+    "sky_blue":    "#CFE8FF",
+    "aero_white":  "#FFFFFF",
+
+    # text (legível e moderno)
+    "text":        "#2B2F38",
+    "text_muted":  "#7A869A",
+    "text_dim":    "#A3AEC2",
+
+    # winamp virou pastel quente
+    "win_orange":  "#F6C28B",
+    "win_yellow":  "#F4E7A1",
+
+    # status (sem neon gritante)
+    "ok":          "#BFEAC5",
+    "warn":        "#F7E6A2",
+    "err":         "#F5B5B5",
 }
 
 EQ_COLORS = [
-    "#00e5ff", "#1e90ff", "#1e90ff", "#3a6fff",
-    "#39ff14", "#39ff14", "#a8ff3e",
-    "#ffe000", "#ff8c00", "#ff2d78",
+    "#A7E9F2", "#B8D9F5", "#B8D9F5", "#C7D4F8",
+    "#B8F2C2", "#B8F2C2", "#D7F7A8",
+    "#F7E6A2", "#F6C28B", "#F7C1CF",
 ]
 
 # ─────────────────────────────────────────────
