@@ -765,7 +765,7 @@ title_frame.pack(side="left")
 
 tk.Label(title_frame, text="◈ AERO MUSIC",
          font=("Segoe UI", 22, "bold"), fg=C["cyan"], bg=C["bg"]).pack(anchor="w")
-tk.Label(title_frame, text=f"DOWNLOADER  {APP_VERSION}  ·  dark cyberpunk edition",
+tk.Label(title_frame, text=f"DOWNLOADER  {APP_VERSION}  ·  dark theme",
          font=("Segoe UI", 9), fg=C["text_muted"], bg=C["bg"]).pack(anchor="w")
 
 gh_btn = tk.Label(header, text="[ GitHub ]",
